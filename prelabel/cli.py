@@ -33,6 +33,9 @@ def main():
     batch.add_argument('--device', default='auto')
     batch.add_argument('--image-size', type=int, default=1280)
     batch.add_argument('--confidence', type=float, default=0.1)
+    batch.add_argument('--mode', choices=['baseline', 'retrieval', 'reference_filter'])
+    batch.add_argument('--reference-min-similarity', type=float, default=0.75)
+    batch.add_argument('--allow-edge-products', action='store_true')
     batch.add_argument('--catalog-id', action='append', default=[], help='Catalog ID (repeatable); default all ingested catalogs')
     args = parser.parse_args()
     root = Path(args.home).resolve()
@@ -80,18 +83,23 @@ def main():
         if not 0.001 <= args.confidence <= 1 or not 320 <= args.image_size <= 4096 or args.image_size % 32:
             parser.error('Invalid detector score or image size')
         config = Settings(checkpoint=str(checkpoint), encoder_path=args.encoder or '', device=args.device,
-                          confidence=args.confidence, image_size=args.image_size).model_dump()
-        config.update(checkpoint_sha256=digest(checkpoint), mode='retrieval' if args.encoder else 'baseline')
+                          confidence=args.confidence, image_size=args.image_size,
+                          reference_min_similarity=args.reference_min_similarity, full_product_only=not args.allow_edge_products).model_dump()
+        config.update(checkpoint_sha256=digest(checkpoint), mode=args.mode or ('reference_filter' if args.encoder else 'baseline'))
+        if config['mode'] in ('retrieval', 'reference_filter') and not args.encoder:
+            parser.error('Catalog-based modes require --encoder with a local model folder')
         config['catalogs'] = [json.loads(p.read_text(encoding='utf-8')) for p in (root / 'catalogs').glob('*/catalog.json')]
         if args.catalog_id:
             available = {c['catalog_id'] for c in config['catalogs']}
             if not set(args.catalog_id) <= available:
                 parser.error('Unknown catalog ID')
             config['catalogs'] = [c for c in config['catalogs'] if c['catalog_id'] in args.catalog_id]
+        if config['mode'] == 'reference_filter' and not any(r['target'] and r['references'] for c in config['catalogs'] for r in c['records']):
+            parser.error('Reference filtering requires target catalog references')
         store = JobStore(root)
         job = store.create(import_images(Path(args.source), root / 'inputs' / uuid.uuid4().hex), config)
         JobRunner(store).run_job(job['id'])
         result = store.get(job['id'])
-        print(json.dumps({k: result[k] for k in ('id', 'status', 'completed', 'errors', 'export_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
+        print(json.dumps({k: result.get(k) for k in ('id', 'status', 'completed', 'errors', 'box_counts', 'export_path', 'review_export_path', 'preview_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
         if result['status'] != 'completed':
             sys.exit(1)

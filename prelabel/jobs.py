@@ -86,7 +86,8 @@ class JobStore:
                 raise ValueError('Only cancelled, interrupted, failed or incomplete jobs can resume')
             if sum(j['status'] in ('queued', 'running', 'cancelling') for j in self.list()) >= 8:
                 raise ValueError('The bounded job queue is full')
-            return self.update(job_id, status='queued', errors=[], processed=job['completed'], export_path=None)
+            return self.update(job_id, status='queued', errors=[], processed=job['completed'], export_path=None,
+                               review_export_path=None, preview_path=None, preview_warning=None, box_counts=None)
 
 
 def default_detector(config):
@@ -136,7 +137,7 @@ class JobRunner:
             detector = self.detector_factory(config)
             metadata['detector'] = detector.metadata
             index, ocr = None, None
-            if config.get('mode') == 'retrieval':
+            if config.get('mode') in ('retrieval', 'reference_filter'):
                 from .models import SiglipEncoder
                 from .retrieval import CatalogIndex
                 catalogs = config.get('catalogs', [])
@@ -193,7 +194,8 @@ class JobRunner:
                             self.store.update(job_id, stage=f'retrieving_crops_{offset}_of_{len(detections)}')
                             subset = detections[offset:offset + batch_size]
                             crops = [image.crop(tuple(d['bbox_xyxy_pixels'])) for d in subset]
-                            for d, candidates in zip(subset, index.search(crops, config.get('top_k', 5))):
+                            for d, candidates in zip(subset, index.search(crops, config.get('top_k', 5),
+                                                                        include_membership=config.get('mode') == 'reference_filter')):
                                 d['candidates'] = candidates
                     retrieval_time = time.perf_counter() - retrieval_start
                     ocr_start = time.perf_counter()
@@ -208,7 +210,8 @@ class JobRunner:
                                 d['ocr_evidence'] = ocr.read(image.crop(tuple(d['bbox_xyxy_pixels'])))
                                 count += 1
                     for d in detections:
-                        d.update(decide(d, baseline=config.get('mode') == 'baseline'))
+                        d.update(decide(d, baseline=config.get('mode') == 'baseline', config=config,
+                                        image_size=(image.width, image.height)))
                     resolved = resolve_packs(detections)
                     result = {**image_record, 'width': image.width, 'height': image.height, 'detections': resolved,
                               'model_versions': metadata, 'staged_sha256': digest(path),
@@ -229,23 +232,45 @@ class JobRunner:
             if status == 'running':
                 status = 'completed_with_errors' if errors else 'completed'
             export_path = None
+            review_path = None
+            preview_path = None
+            preview_warning = None
+            counts = {'retained': 0, 'deferred': 0, 'edge_risk': 0, 'removed': 0}
+            for result in results.values():
+                for detection in result['detections']:
+                    decision = detection['decision']
+                    counts['deferred' if decision == 'defer_review' else 'removed' if decision == 'remove' else 'retained'] += 1
+                    counts['edge_risk'] += detection.get('decision_reason') == 'possible_image_edge_truncation'
             if status in ('completed', 'completed_with_errors') and results:
                 self.store.update(job_id, stage='exporting')
                 export_path = str(export_zip([results[k] for k in sorted(results, key=int)], directory / 'set_001.zip'))
+                if counts['deferred']:
+                    review_path = str(export_zip([results[k] for k in sorted(results, key=int)], directory / 'review_candidates.zip', stream='review'))
+                from .preview import save_preview
+                try:
+                    preview_path = save_preview(results[min(results, key=int)], directory / 'preview.jpg')
+                except Exception as exc:
+                    preview_warning = f'{type(exc).__name__}: {exc}'
             if status == 'completed_with_errors' and not results:
                 status = 'failed'
-            self.store.update(job_id, status=status, export_path=export_path)
+            self.store.update(job_id, status=status, export_path=export_path, review_export_path=review_path, box_counts=counts,
+                              preview_path=preview_path, preview_warning=preview_warning)
         except JobCancelled:
             self.store.update(job_id, status='interrupted' if self.stop_event.is_set() else 'cancelled')
         except Exception as exc:
             errors.append({'stage': 'job', 'error': f'{type(exc).__name__}: {exc}'})
-            self.store.update(job_id, status='failed', errors=errors, export_path=None)
+            self.store.update(job_id, status='failed', errors=errors, export_path=None,
+                              review_export_path=None, preview_path=None)
         finally:
             import psutil
             evidence = {'job_id': job_id, 'model_versions': metadata, 'config': config,
                         'results': list(results.values()), 'errors': errors,
                         'elapsed_seconds': time.perf_counter() - start + job['elapsed_seconds'],
                         'worker_memory_rss_bytes': psutil.Process().memory_info().rss,
-                        'policy': 'retain_uncertain; no unvalidated automatic exclusion or pack merging'}
+                        'preview_warning': self.store.get(job_id).get('preview_warning'),
+                        'policy': {'mode': config.get('mode', 'baseline'), 'full_product_only': config.get('full_product_only', False),
+                                   'reference_min_similarity': config.get('reference_min_similarity'),
+                                   'threshold_calibrated': False, 'deferred_boxes_recoverable': True,
+                                   'occlusion_checked': False, 'automatic_pack_detection': False}}
             write_json(directory / 'evidence.json', evidence)
             self.store.update(job_id, evidence_path=str(directory / 'evidence.json'), elapsed_seconds=evidence['elapsed_seconds'], stage='finished')

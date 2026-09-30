@@ -140,3 +140,46 @@ def test_resume_rejects_changed_completed_image(tmp_path):
     result = store.get(job['id'])
     assert result['status'] == 'failed'
     assert 'changed' in result['errors'][0]['error'].lower()
+
+
+def test_worker_exports_edge_risk_in_separate_review_zip(tmp_path):
+    store = JobStore(tmp_path)
+    job = store.create(stage(tmp_path, 1), {'mode': 'baseline', 'full_product_only': True, 'edge_margin_fraction': 0.01})
+    class EdgeDetector(Detector):
+        def detect(self, image):
+            return [{'bbox_xyxy_pixels': [0, 2, 5, 8], 'detection_score': 0.7, 'detector_class_id': 0}]
+    JobRunner(store, detector_factory=lambda config: EdgeDetector()).run_job(job['id'])
+    result = store.get(job['id'])
+    assert result['status'] == 'completed'
+    assert result['box_counts'] == {'retained': 0, 'deferred': 1, 'edge_risk': 1, 'removed': 0}
+    with zipfile.ZipFile(result['export_path']) as z:
+        assert z.read('labels/0.txt') == b''
+    with zipfile.ZipFile(result['review_export_path']) as z:
+        assert len(z.read('labels/0.txt').splitlines()) == 1
+    assert Path(result['preview_path']).is_file()
+
+
+def test_resume_clears_all_export_artifacts(tmp_path):
+    store = JobStore(tmp_path)
+    job = store.create(stage(tmp_path, 1), {'mode': 'baseline'})
+    store.update(job['id'], status='completed_with_errors', export_path='old.zip',
+                 review_export_path='old_review.zip', preview_path='old.jpg', box_counts={'retained': 5})
+    resumed = store.resume(job['id'])
+    assert resumed['export_path'] is None
+    assert resumed['review_export_path'] is None
+    assert resumed['preview_path'] is None
+    assert resumed['box_counts'] is None
+
+
+def test_optional_preview_failure_preserves_completed_exports(tmp_path, monkeypatch):
+    store = JobStore(tmp_path)
+    job = store.create(stage(tmp_path, 1), {'mode': 'baseline'})
+    def fail_preview(*args):
+        raise OSError('preview unavailable')
+    monkeypatch.setattr('prelabel.preview.save_preview', fail_preview)
+    JobRunner(store, detector_factory=lambda config: Detector()).run_job(job['id'])
+    result = store.get(job['id'])
+    assert result['status'] == 'completed'
+    assert Path(result['export_path']).is_file()
+    assert result['preview_path'] is None
+    assert 'preview unavailable' in result['preview_warning']

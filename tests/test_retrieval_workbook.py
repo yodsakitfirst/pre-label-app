@@ -137,3 +137,13 @@ def test_index_reports_bounded_progress(tmp_path):
     progress = []
     CatalogIndex([catalog], Encoder(), tmp_path / 'cache', batch_size=2, on_progress=lambda done, total: progress.append((done, total)))
     assert progress == [(0, 3), (2, 3), (3, 3)]
+
+
+def test_reference_gate_sees_excluded_match_outside_top_k(tmp_path):
+    ref = tmp_path / 'ref.png'
+    Image.new('RGB', (10, 10), 'red').save(ref)
+    records = [{'sku_id': sku, 'barcode': sku, 'name': sku, 'target': target,
+                'references': [{'path': str(ref), 'sha256': sku}]} for sku, target in [('target', True), ('excluded', False)]]
+    index = CatalogIndex([{'catalog_version': 'cat', 'records': records}], Encoder(), tmp_path / 'cache')
+    results = index.search([Image.new('RGB', (10, 10), 'red')], top_k=1, include_membership=True)[0]
+    assert {c['target'] for c in results} == {True, False}

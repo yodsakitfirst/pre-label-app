@@ -10,7 +10,7 @@ The provided model and nine catalog ZIPs have been copied/ingested under the ign
 .\.venv\Scripts\python.exe -m prelabel serve
 ```
 
-Or run `scripts/start.ps1`. In Batches, enter an image folder/ZIP path or choose an image ZIP. Select **Detector baseline**, or **Detector + catalog candidates** with a local encoder and selected catalogs. Download the YOLO ZIP and the separate evidence file when processing finishes.
+Or run `scripts/start.ps1`. In Batches, enter an image folder/ZIP path or choose an image ZIP. Use the default **Reference-matched export + review ZIP** mode with the local encoder and selected target catalogs. Keep **Exclude likely image-edge cuts** checked. Download the main YOLO ZIP, review ZIP and evidence when processing finishes. Existing batches keep their original settings; start a new batch to apply the filter.
 
 This computer already has a configured Python 3.12 environment. Do not run `py -3 -m venv .venv` over it: Windows locks the launcher while the app runs, and an attempted recreation with another Python version can leave mixed incompatible packages. Use the start command above. Stop the server with Ctrl+C before deliberately rebuilding an environment.
 
@@ -75,7 +75,9 @@ This downloads `google/siglip2-base-patch16-224` into `runtime/models/siglip2-ba
 
 Reference embeddings are normalized, cached, and compared by cosine similarity. Multiple reference views are aggregated by source SKU record before shortlisting. Cache identity includes reference hashes, target status, catalog identity, model weights/config and Transformers version. Crops come from full-resolution, correctly oriented image pixels and are encoded in bounded batches. Top-K and batch size are configurable.
 
-Scores are similarities, not probabilities or calibrated SKU confidence. A nearest target match does not establish that a crop belongs to the target list. The initial policy retains all uncertain boxes, including unfamiliar products with low similarity. Candidates are in the separate evidence JSON; the YOLO ZIP always exports class `0: product`.
+Scores are similarities, not probabilities or calibrated SKU confidence. A nearest target match does not establish that a crop belongs to the target list. The default reference-filter mode uses the selected target references to gate the main export. The experimental default cutoff is **0.75**. Crops below it, without target candidates, or too close to a selected excluded-reference match go to `review_candidates.zip`. The strongest target and excluded candidates are considered even outside the displayed top-K. This is a recoverable export preference, not a validated membership classifier: similar non-target packaging can still pass, and real targets can fall below the cutoff. Tune it using reviewed shelf photos. Candidates and raw scores are in the evidence JSON; both YOLO ZIPs export class `0: product`, with no automatic SKU assignment.
+
+**Detector baseline** ignores catalogs. **Catalog candidates only** computes reference matches but keeps uncertain detector boxes. Both still apply the image-edge filter when enabled. The default image-edge check defers boxes within 1% of the image boundary. It can exclude complete products near the edge and miss cropped products whose detected box stops inside that margin. It does not verify products hidden behind shelves or other products. Edge margin, cutoff and excluded-match margin are configurable under Model & settings; the checkbox and cutoff can also be overridden per batch.
 
 ## Optional local OCR
 
@@ -106,7 +108,7 @@ names:
 
 Each label has five fields: integer class `0`, normalized center X/Y and width/height, without confidence or extra flags. Successful photos with zero detections receive empty labels. Failed photos are omitted and listed prominently in job failures and evidence; a failed detector never becomes an empty prediction. Duplicate stems are disambiguated consistently for image/label pairs.
 
-Source files are never overwritten. Images with ordinary orientation are copied byte-for-byte. EXIF-rotated images are exported with normalized pixels and stripped rotation metadata, with the transformation recorded. Such images may be re-encoded to keep pixels and imported coordinates aligned. Preview overlays, if produced by external tooling, are separate from original export images.
+Source files are never overwritten. Images with ordinary orientation are copied byte-for-byte. EXIF-rotated images are exported with normalized pixels and stripped rotation metadata, with the transformation recorded. Such images may be re-encoded to keep pixels and imported coordinates aligned. Each completed batch provides a separate preview of the first successful photo with main-export boxes and candidate scores. Candidate barcodes on previews are suggestions, not assigned labels. Original export images have no overlays.
 
 The output contract follows the supplied prompt. Import into the existing annotation app, empty-label behavior, human SKU re-export, automatic SKU mapping, and needs-review import flags still require a pilot in that app.
 
@@ -126,7 +128,7 @@ python -m prelabel batch '/path/to/photos' --checkpoint '/path/to/sku110k-2.pt' 
   --encoder '/path/to/siglip2-base-patch16-224' --device cpu
 ```
 
-CLI retrieval uses ingested catalogs; use repeatable `--catalog-id` arguments to restrict the selection. A batch with image errors prints details and exits nonzero even if a partial ZIP is available. Set `PRELABEL_HOME` or pass global `--home /path/to/runtime` before the subcommand to keep another workspace.
+With an encoder, CLI batches default to `reference_filter`; without one they default to `baseline`. Use `--mode retrieval` for candidates without reference filtering, `--reference-min-similarity 0.75` to adjust the gate, or `--allow-edge-products` to disable the edge check. CLI matching uses ingested catalogs; use repeatable `--catalog-id` arguments to restrict the selection. A batch with image errors prints details and exits nonzero even if a partial ZIP is available. Set `PRELABEL_HOME` or pass global `--home /path/to/runtime` before the subcommand to keep another workspace.
 
 ## Verification and accuracy pilot
 
@@ -137,7 +139,7 @@ node --check prelabel/static/app.js
 
 Tests exercise image/label pairing, empty labels, normalized coordinates, EXIF rotation, conservative retention, adjacent standalone products, evidence-gated pack suppression, duplicates, ZIP safety, workbook relationships, retrieval cache and aggregation, queue bounds, failure handling, cancellation and resume. Deterministic encoder/detector fixtures test software behavior; they do not prove model accuracy. See `docs/validation.md` for asset checks and real smoke-test evidence.
 
-For an accuracy pilot, review approximately 100 representative shelf photos including targets, similar non-target variants, packs, adjacent standalone products, glare and occlusion. Split by photo/capture session. Compare against baseline: end-to-end target box recall (including detector misses), target boxes removed, non-product/excluded removal precision and coverage, localization, pack boundaries/remaining constituents, candidate recall@K and annotation time. Record throughput, per-stage times, errors and memory on the actual Mac. Enable filtering or SKU assignment only after agreeing thresholds from reviewed data. The supplied model-generated images/labels are not verified ground truth.
+For an accuracy pilot, review approximately 100 representative shelf photos including targets, similar non-target variants, packs, adjacent standalone products, glare and occlusion. Split by photo/capture session. Compare against baseline: end-to-end target box recall (including detector misses), target boxes removed, non-product/excluded removal precision and coverage, localization, pack boundaries/remaining constituents, candidate recall@K and annotation time. Record throughput, per-stage times, errors and memory on the actual Mac. The experimental export gate is available now at the user’s request, with deferred boxes recoverable. Validate thresholds before trusting it for production; automatic verified exclusion and SKU assignment remain disabled. The supplied model-generated images/labels are not verified ground truth.
 
 ## Licensing and model references
 
