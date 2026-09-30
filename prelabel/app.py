@@ -34,6 +34,10 @@ class Settings(BaseModel):
     max_det: int = Field(default=3000, ge=1, le=10000)
     crop_batch_size: int = Field(default=16, ge=1, le=128)
     top_k: int = Field(default=5, ge=1, le=100)
+    full_product_only: bool = True
+    edge_margin_fraction: float = Field(default=0.01, ge=0, le=0.05)
+    reference_min_similarity: float = Field(default=0.75, ge=-1, le=1)
+    excluded_margin: float = Field(default=0.03, ge=0, le=2)
     ocr_enabled: bool = False
     ocr_detection_model: str = ''
     ocr_recognition_model: str = ''
@@ -44,8 +48,10 @@ class Settings(BaseModel):
 
 class JobRequest(BaseModel):
     source: str
-    mode: str = 'baseline'
+    mode: str = 'reference_filter'
     catalog_ids: list[str] = []
+    full_product_only: bool | None = None
+    reference_min_similarity: float | None = Field(default=None, ge=-1, le=1)
 
 
 class CatalogRequest(BaseModel):
@@ -116,7 +122,10 @@ def create_app(root=None, start_worker=True):
         return result
 
     def job_summary(job):
-        return {k: v for k, v in job.items() if k not in ('images', 'results', 'config')}
+        return {**{k: v for k, v in job.items() if k not in ('images', 'results', 'config')},
+                'mode': job['config'].get('mode', 'baseline'),
+                'reference_min_similarity': job['config'].get('reference_min_similarity'),
+                'full_product_only': job['config'].get('full_product_only', False)}
 
     @app.get('/')
     def home():
@@ -128,7 +137,9 @@ def create_app(root=None, start_worker=True):
         return {'token': token, 'platform': platform.platform(), 'python': platform.python_version(),
                 'memory_gb': round(psutil.virtual_memory().total / 1024**3, 1),
                 'settings': settings().model_dump(), 'runtime': str(root),
-                'capabilities': {'automatic_exclusion': False, 'automatic_pack_detection': False, 'exact_sku_export': False}}
+                'capabilities': {'automatic_exclusion': False, 'reference_export_gate': True,
+                                 'image_edge_filter': True, 'occlusion_verification': False,
+                                 'automatic_pack_detection': False, 'exact_sku_export': False}}
 
     @app.put('/api/settings')
     def save_settings(value: Settings):
@@ -199,19 +210,24 @@ def create_app(root=None, start_worker=True):
 
     @app.post('/api/jobs')
     def add_job(value: JobRequest):
-        if value.mode not in ('baseline', 'retrieval'):
-            raise ValueError('Mode must be baseline or retrieval')
+        if value.mode not in ('baseline', 'retrieval', 'reference_filter'):
+            raise ValueError('Mode must be baseline, retrieval, or reference_filter')
         config = settings().model_dump()
         checkpoint = Path(config['checkpoint'])
         if not checkpoint.is_file():
             raise ValueError('Configure a detector checkpoint before starting')
         config['checkpoint_sha256'] = digest(checkpoint)
         config['mode'] = value.mode
+        for key in ('full_product_only', 'reference_min_similarity'):
+            if getattr(value, key) is not None:
+                config[key] = getattr(value, key)
         available = {c['catalog_id']: c for c in catalogs()}
         if any(i not in available for i in value.catalog_ids):
             raise ValueError('Unknown catalog selection')
         config['catalogs'] = [available[i] for i in value.catalog_ids]
-        if value.mode == 'retrieval' and (not config['encoder_path'] or not config['catalogs']):
+        if value.mode == 'reference_filter' and not any(r['target'] and r['references'] for c in config['catalogs'] for r in c['records']):
+            raise ValueError('Reference filtering requires selected target catalogs with reference images')
+        if value.mode in ('retrieval', 'reference_filter') and (not config['encoder_path'] or not config['catalogs']):
             raise ValueError('Retrieval requires a local SigLIP model and selected catalogs')
         if sum(j['status'] in ('queued', 'running', 'cancelling') for j in store.list()) >= 8:
             raise ValueError('The bounded job queue is full')
@@ -233,11 +249,13 @@ def create_app(root=None, start_worker=True):
 
     @app.get('/api/jobs/{job_id}/download/{artifact}')
     def download(job_id: str, artifact: str):
-        key = {'export': 'export_path', 'evidence': 'evidence_path'}.get(artifact)
+        key = {'export': 'export_path', 'evidence': 'evidence_path', 'review': 'review_export_path', 'preview': 'preview_path'}.get(artifact)
         job = store.get(job_id)
         if key is None or not job.get(key) or not Path(job[key]).is_file():
             raise HTTPException(404, 'Artifact is not ready')
-        return FileResponse(job[key], filename=f"{job_id[:8]}_{'set_001.zip' if artifact == 'export' else 'evidence.json'}")
+        filename = {'export': 'set_001.zip', 'review': 'review_candidates.zip', 'evidence': 'evidence.json', 'preview': 'preview.jpg'}[artifact]
+        return FileResponse(job[key], filename=f'{job_id[:8]}_{filename}',
+                            content_disposition_type='inline' if artifact == 'preview' else 'attachment')
 
     app.mount('/static', StaticFiles(directory=STATIC), name='static')
     return app
