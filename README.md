@@ -79,13 +79,26 @@ Scores are similarities, not probabilities or calibrated SKU confidence. A neare
 
 **Detector baseline** ignores catalogs. **Catalog candidates only** computes reference matches but keeps uncertain detector boxes. Both still apply the image-edge filter when enabled. The default image-edge check defers boxes within 1% of the image boundary. It can exclude complete products near the edge and miss cropped products whose detected box stops inside that margin. It does not verify products hidden behind shelves or other products. Edge margin, cutoff and excluded-match margin are configurable under Model & settings; the checkbox and cutoff can also be overridden per batch.
 
-## Optional local OCR
+## Local Thai/English OCR
 
-```sh
-python -m pip install -e '.[ocr]'
+On this computer, EasyOCR and its Thai/English models are installed under `runtime/models/easyocr-th-en`; OCR is enabled for new batches. Restart the server and reload the page after an upgrade. Select **Read packaging text with OCR** in Batches. Existing jobs keep their saved configuration.
+
+For a new installation:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[models,ocr]"
+.\.venv\Scripts\python.exe -m prelabel download-ocr
 ```
 
-Provide compatible local ONNX detection and Thai/English recognition weights and the matching character dictionary in Model & settings, then enable OCR. The adapter uses RapidOCR as an optional local ONNX runner; it does not install the Paddle runtime or automatically acquire OCR weights. OCR executes on a bounded number of ambiguous crops and records text and raw recognition scores. Missing text never rejects a product. PP-OCRv5 model conversion/runtime and Thai accuracy have not been validated on these shelf photos or on macOS; this capability remains experimental.
+`download-ocr` explicitly downloads official EasyOCR CRAFT text-detection and Thai/English recognition models, validates an offline load, saves model hashes, and enables OCR in settings. Downloads need internet; batch processing never downloads models or uploads photos. The EasyOCR backend uses CPU independently of the detector/embedding device.
+
+OCR runs on each full-resolution detected crop, in detector order, up to the configurable limit (300 crops per photo by default). Set a larger limit for dense shelves. Cancellation is checked between crops. Each box records completed/no-text/failed/skipped-limit status, raw text, recognition score and text quadrilaterals relative to the crop. Crop failures preserve YOLO boxes; missing models fail explicitly before processing.
+
+**OCR text** opens a read-only results table. **OCR report** downloads `ocr.json`; complete evidence includes the same data, model versions and timing. Text from lines meeting the default 0.7 OCR score supports a separate catalog-candidate ranking by exact barcode or normalized word overlap. Accented Latin brand names are folded and Thai marks preserved. Generic words are ignored. This lexical ranking is experimental, considers only the visual shortlist, and can miss OCR spelling errors or Thai word boundaries.
+
+OCR suggestions do **not** alter visual similarity scores, the reference cutoff, edge decisions or generic YOLO labels. They are not verified SKU assignments. Unreadable text does not reject a product. Laya is not included. Use reviewed shelf examples to assess OCR accuracy before enabling future acceptance rules.
+
+The previous custom ONNX adapter remains available through `pip install -e ".[ocr-onnx]"` and the RapidOCR backend in settings. Supply compatible detector/recognizer/dictionary files. Existing ONNX configurations keep that backend. It remains an advanced option; its Thai model conversions are not validated here.
 
 ## Export and source preservation
 
