@@ -19,6 +19,9 @@ def main():
     download = commands.add_parser('download-model', help='Explicitly download SigLIP 2 weights for subsequent offline processing')
     download.add_argument('--revision', default='main')
     commands.add_parser('download-ocr', help='Download local Thai/English EasyOCR models and enable OCR for new batches')
+    commands.add_parser('download-laya', help='Install pinned local Laya runtime and ONNX weights; enable fusion for new batches')
+    compare_parser = commands.add_parser('compare-fusion', help='Compare visual, OCR-rule and Laya policies on saved batch evidence')
+    compare_parser.add_argument('job_id')
     catalog = commands.add_parser('catalog', help='Ingest a catalog ZIP or explicitly mapped workbook')
     catalog.add_argument('source')
     catalog.add_argument('--excluded', action='store_true')
@@ -43,6 +46,7 @@ def main():
     batch.add_argument('--ocr', action='store_true', help='Enable local Thai/English OCR')
     batch.add_argument('--ocr-model-dir', help='EasyOCR model folder; defaults to HOME/models/easyocr-th-en')
     batch.add_argument('--ocr-max-crops', type=int, default=300)
+    batch.add_argument('--fusion-backend', choices=['visual', 'rules', 'laya'], default='visual')
     batch.add_argument('--catalog-id', action='append', default=[], help='Catalog ID (repeatable); default all ingested catalogs')
     args = parser.parse_args()
     root = Path(args.home).resolve()
@@ -73,6 +77,22 @@ def main():
             settings = json.loads(settings_path.read_text(encoding='utf-8'))
             settings['encoder_path'] = str(destination)
             write_json(settings_path, settings)
+    elif args.command == 'compare-fusion':
+        from .fusion_evaluation import compare
+        from .laya import LayaEngine
+        config = json.loads((root / 'settings.json').read_text(encoding='utf-8'))
+        engine = LayaEngine(config)
+        try:
+            report = compare(root, args.job_id, engine)
+        finally:
+            engine.close()
+        path = root / 'validation' / f'fusion-{args.job_id}.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, report)
+        print(json.dumps({'report': str(path), 'reviewed': report['reviewed'], 'summary': report['summary']}, indent=2))
+    elif args.command == 'download-laya':
+        from .laya_setup import setup
+        print(json.dumps(setup(root), indent=2))
     elif args.command == 'download-ocr':
         from easyocr import Reader
         from .ocr import EasyOCREngine, EASY_MODEL_FILES
@@ -111,7 +131,13 @@ def main():
                           reference_min_similarity=args.reference_min_similarity, full_product_only=not args.allow_edge_products,
                           reference_sku_margin=args.reference_sku_margin, use_reviewed_examples=not args.no_reviewed_examples,
                           ocr_enabled=args.ocr, ocr_model_dir=args.ocr_model_dir or str(root / 'models' / 'easyocr-th-en'),
-                          ocr_max_crops=args.ocr_max_crops).model_dump()
+                          ocr_max_crops=args.ocr_max_crops, fusion_backend=args.fusion_backend).model_dump()
+        if args.fusion_backend == 'laya':
+            saved_path = root / 'settings.json'
+            saved = json.loads(saved_path.read_text(encoding='utf-8')) if saved_path.exists() else {}
+            for key in ('laya_model_dir', 'laya_package_dir', 'laya_node_path', 'fusion_min_probability'):
+                if key in saved:
+                    config[key] = saved[key]
         if args.ocr:
             from .ocr import validate_ocr
             validate_ocr(config)
@@ -135,7 +161,7 @@ def main():
         job = store.create(import_images(Path(args.source), root / 'inputs' / uuid.uuid4().hex), config)
         JobRunner(store).run_job(job['id'])
         result = store.get(job['id'])
-        print(json.dumps({k: result.get(k) for k in ('id', 'status', 'completed', 'errors', 'box_counts', 'ocr_counts',
+        print(json.dumps({k: result.get(k) for k in ('id', 'status', 'completed', 'errors', 'box_counts', 'ocr_counts', 'fusion_counts', 'fusion_warning',
                                                     'ocr_report_path', 'export_path', 'preview_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
         if result['status'] != 'completed':
             sys.exit(1)

@@ -96,8 +96,10 @@ def rank_candidates(candidates, evidence, min_score=0.7):
 
 
 def make_report(results):
-    return {'text_ranking_changes_export': False, 'images': [
+    return {'text_ranking_changes_export': False,
+            'fusion_changes_export': any(d.get('fusion_evidence', {}).get('applied') for r in results for d in r['detections']),
+            'images': [
         {'name': r['name'], 'boxes': [
             {key: d.get(key) for key in ('detection_id', 'bbox_xyxy_pixels', 'decision', 'decision_reason',
-                                       'ocr_status', 'ocr_error', 'ocr_evidence', 'ocr_candidate_ranking')}
+                                       'ocr_status', 'ocr_error', 'ocr_evidence', 'ocr_candidate_ranking', 'fusion_evidence')}
             for d in r['detections']]} for r in results]}

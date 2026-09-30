@@ -197,3 +197,6 @@ supports `--reference-sku-margin` and `--no-reviewed-examples`.
 OCR remains an auxiliary text view: weak or unreadable text does not establish a SKU
 and does not override the visual gate. Interior occlusion and complete promotional
 pack boundaries still require human review.
+# Laya decision fusion
+
+Optional local Laya fusion combines packaging OCR with catalog similarities while preserving one YOLO ZIP. Setup, fallback rules, and saved-evidence comparisons are documented in [the Laya workflow](docs/laya-workflow.md).

@@ -88,7 +88,7 @@ class JobStore:
                 raise ValueError('The bounded job queue is full')
             return self.update(job_id, status='queued', errors=[], processed=job['completed'], export_path=None,
                                review_export_path=None, preview_path=None, preview_warning=None, box_counts=None,
-                               ocr_report_path=None, ocr_counts=None)
+                               ocr_report_path=None, ocr_counts=None, fusion_counts=None, fusion_warning=None)
 
 
 def default_detector(config):
@@ -133,7 +133,9 @@ class JobRunner:
         results, errors = dict(job['results']), []
         directory = Path(job['directory'])
         config = job['config']
+        self.store.update(job_id, fusion_warning=None, fusion_counts=None)
         metadata = {}
+        fusion = None
         try:
             detector = self.detector_factory(config)
             metadata['detector'] = detector.metadata
@@ -160,6 +162,18 @@ class JobRunner:
                 self.store.update(job_id, stage='loading_ocr')
                 ocr = create_ocr(config)
                 metadata['ocr'] = ocr.version
+            if config.get('fusion_backend', 'visual') != 'visual' and config.get('mode') == 'reference_filter':
+                from .fusion import VERSION
+                metadata['fusion'] = {'policy': VERSION, 'backend': config['fusion_backend']}
+                if config['fusion_backend'] == 'laya' and ocr:
+                    self.store.update(job_id, stage='loading_laya')
+                    try:
+                        from .laya import LayaEngine
+                        fusion = LayaEngine(config)
+                        metadata['fusion']['model'] = fusion.version
+                    except Exception as exc:
+                        metadata['fusion']['fallback'] = f'{type(exc).__name__}: {exc}'
+                        self.store.update(job_id, fusion_warning=metadata['fusion']['fallback'])
             for saved in results.values():
                 previous_models = saved.get('model_versions') or (saved['detections'][0].get('model_versions') if saved.get('detections') else None)
                 if previous_models and json.dumps(previous_models, sort_keys=True) != json.dumps(metadata, sort_keys=True):
@@ -223,14 +237,23 @@ class JobRunner:
                     else:
                         for d in detections:
                             d['ocr_status'] = 'disabled'
-                    for d in detections:
+                    ocr_time = time.perf_counter() - ocr_start
+                    fusion_start = time.perf_counter()
+                    for fusion_number, d in enumerate(detections):
+                        if self.stop_event.is_set() or self.store.get(job_id)['status'] == 'cancelling':
+                            raise JobCancelled()
                         d.update(decide(d, baseline=config.get('mode') == 'baseline', config=config,
                                         image_size=(image.width, image.height)))
+                        if config.get('mode') == 'reference_filter' and config.get('fusion_backend', 'visual') != 'visual':
+                            from .fusion import fuse
+                            self.store.update(job_id, stage=f'fusion_crop_{fusion_number + 1}_of_{len(detections)}')
+                            d.update(fuse(d, {k: d[k] for k in ('decision', 'decision_reason')}, config, fusion))
                     resolved = resolve_packs(detections)
                     result = {**image_record, 'width': image.width, 'height': image.height, 'detections': resolved,
                               'model_versions': metadata, 'staged_sha256': digest(path),
                               'timings': {'detection': detect_time, 'retrieval': retrieval_time,
-                                          'ocr': time.perf_counter() - ocr_start, 'total': time.perf_counter() - image_start}}
+                                          'ocr': ocr_time, 'fusion': time.perf_counter() - fusion_start,
+                                          'total': time.perf_counter() - image_start}}
                     write_json(directory / 'results' / f'{number}.json', result)
                     results[str(number)] = result
                 except JobCancelled:
@@ -249,11 +272,18 @@ class JobRunner:
             preview_path = None
             preview_warning = None
             counts = {'retained': 0, 'deferred': 0, 'edge_risk': 0, 'removed': 0}
+            fusion_counts = {'attempted': 0, 'changed': 0, 'failed': 0, 'fallback': 0}
             for result in results.values():
                 for detection in result['detections']:
                     decision = detection['decision']
                     counts['deferred' if decision == 'defer_review' else 'removed' if decision == 'remove' else 'retained'] += 1
                     counts['edge_risk'] += detection.get('decision_reason') == 'possible_image_edge_truncation'
+                    audit = detection.get('fusion_evidence', {})
+                    if audit:
+                        fusion_counts['attempted'] += audit['status'] in ('completed', 'failed')
+                        fusion_counts['changed'] += bool(audit['applied'])
+                        fusion_counts['failed'] += audit['status'] == 'failed'
+                        fusion_counts['fallback'] += not audit['applied']
             if status in ('completed', 'completed_with_errors') and results:
                 self.store.update(job_id, stage='exporting')
                 export_path = str(export_zip([results[k] for k in sorted(results, key=int)], directory / 'set_001.zip'))
@@ -265,7 +295,8 @@ class JobRunner:
             if status == 'completed_with_errors' and not results:
                 status = 'failed'
             self.store.update(job_id, status=status, export_path=export_path, review_export_path=None, box_counts=counts,
-                              preview_path=preview_path, preview_warning=preview_warning)
+                              preview_path=preview_path, preview_warning=preview_warning,
+                              fusion_counts=fusion_counts if config.get('fusion_backend', 'visual') != 'visual' else None)
         except JobCancelled:
             self.store.update(job_id, status='interrupted' if self.stop_event.is_set() else 'cancelled')
         except Exception as exc:
@@ -273,6 +304,8 @@ class JobRunner:
             self.store.update(job_id, status='failed', errors=errors, export_path=None,
                               review_export_path=None, preview_path=None)
         finally:
+            if fusion is not None:
+                fusion.close()
             import psutil
             ocr_report_path = None
             ocr_counts = None

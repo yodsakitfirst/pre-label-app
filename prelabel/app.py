@@ -51,6 +51,11 @@ class Settings(BaseModel):
     ocr_dictionary: str = ''
     ocr_margin: float = Field(default=0.05, ge=0, le=2)
     ocr_max_crops: int = Field(default=300, ge=1, le=10000)
+    fusion_backend: Literal['visual', 'rules', 'laya'] = 'visual'
+    fusion_min_probability: float = Field(default=0.9, ge=0.5, le=1)
+    laya_model_dir: str = ''
+    laya_package_dir: str = ''
+    laya_node_path: str = ''
 
     @model_validator(mode='before')
     @classmethod
