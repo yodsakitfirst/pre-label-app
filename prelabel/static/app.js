@@ -1,0 +1,41 @@
+'use strict';
+let token = '', catalogs = [], galleryLimit = 40;
+const $ = selector => document.querySelector(selector);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function notice(message, error=false) { $('#notice').textContent=message; $('#notice').className=error?'error':''; $('#notice').hidden=false; }
+async function api(path, options={}) {
+  const response=await fetch('/api/'+path, {...options, headers:{'X-Prelabel-Token':token, ...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}), ...options.headers}});
+  if(!response.ok) { let value; try {value=await response.json();}catch {value={detail:response.statusText};} throw new Error(typeof value.detail==='string'?value.detail:JSON.stringify(value.detail)); }
+  return response.json();
+}
+async function upload(file) { const data=new FormData();data.append('file',file);notice('Uploading '+file.name+'…');return api('uploads',{method:'POST',body:data}); }
+function activate(tab) { document.querySelectorAll('.tab').forEach(el=>el.classList.toggle('active',el.id===tab)); document.querySelectorAll('nav button').forEach(el=>el.classList.toggle('active',el.dataset.tab===tab));$('#page-name').textContent={batches:'Batches',catalogs:'Reference catalogs',settings:'Model & settings'}[tab]; }
+document.querySelectorAll('nav button').forEach(button=>button.onclick=()=>activate(button.dataset.tab));
+function fillSettings(settings) { for(const [key,value] of Object.entries(settings)) { const el=$('#settings-form').elements.namedItem(key);if(el){if(el.type==='checkbox')el.checked=value;else el.value=value;}} }
+async function loadCatalogs() {
+  const selected=new Set([...document.querySelectorAll('#catalog-selection input:checked')].map(x=>x.value));
+  const initial=!catalogs.length;
+  catalogs=await api('catalogs');$('#catalog-count').textContent=catalogs.length;
+  $('#record-count').textContent=catalogs.reduce((sum,c)=>sum+c.records.length,0).toLocaleString();
+  $('#catalog-selection').innerHTML=catalogs.length?catalogs.map(c=>`<label class="checkbox"><input type="checkbox" value="${esc(c.catalog_id)}" ${selected.has(c.catalog_id)||initial?'checked':''}>${esc(c.source)} <small>${c.records.length} · ${c.target?'target':'excluded'}</small></label>`).join(''):'Add catalogs in Reference catalogs.';
+  $('#catalog-list').innerHTML=catalogs.map(c=>`<div class="catalog-card"><strong>${esc(c.source)}</strong><span class="status">${c.target?'TARGET':'EXCLUDED'}</span><p>${c.records.length} records · ${c.records.reduce((s,r)=>s+r.references.length,0)} mapped references · inspect associations below</p>${c.warnings.length?`<details class="warnings"><summary>${c.warnings.length} catalog warnings</summary>${c.warnings.map(w=>`<p>${esc(w)}</p>`).join('')}</details>`:''}</div>`).join('');
+  renderGallery();
+}
+function renderGallery() {
+  const query=$('#catalog-search').value.trim().toLowerCase();
+  const records=catalogs.flatMap(c=>c.records.map(r=>({...r,catalog_id:c.catalog_id,source:c.source}))).filter(r=>(r.barcode+' '+r.name).toLowerCase().includes(query));
+  $('#reference-gallery').innerHTML=records.slice(0,galleryLimit).map(r=>`<article class="reference">${r.references.length?`<img loading="lazy" alt="${esc(r.name)}" src="/api/catalogs/${r.catalog_id}/references/${r.sku_id}/0">`:'<div class="empty">No mapped reference</div>'}<div><strong>${esc(r.barcode)}</strong><p>${esc(r.name)}</p><small>${esc(r.source)} · ID ${esc(r.source_id)}</small></div></article>`).join('');
+  $('#more-references').hidden=records.length<=galleryLimit;
+}
+$('#catalog-search').oninput=()=>{galleryLimit=40;renderGallery();};$('#more-references').onclick=()=>{galleryLimit+=40;renderGallery();};
+async function loadJobs() {
+  const jobs=await api('jobs');$('#job-count').textContent=jobs.length+' batches';$('#complete-count').textContent=jobs.filter(j=>['completed','completed_with_errors'].includes(j.status)).length;
+  if(!jobs.length)return;
+  $('#jobs').innerHTML=jobs.map(j=>{const active=['running','cancelling'].includes(j.status);const elapsed=j.elapsed_seconds+(active&&j.started_at?Date.now()/1000-j.started_at:0);return `<article class="job"><div><div class="job-title">Batch ${j.id.slice(0,8)} <span class="status ${j.status}">${esc(j.status.replaceAll('_',' '))}</span></div><div class="job-meta">${new Date(j.created_at*1000).toLocaleString()} · ${j.total} photos · ${elapsed.toFixed(1)}s elapsed ${active&&j.stage?'· '+esc(j.stage.replaceAll('_',' ')):''}</div><div class="progress"><div style="width:${Math.round(j.processed/j.total*100)}%"></div></div><div class="job-meta">${j.completed} successful · ${j.errors.length} failed · ${j.processed} / ${j.total} processed ${j.current_image?'· '+esc(j.current_image):''}</div></div><div class="job-actions">${j.export_path?`<a class="export" href="/api/jobs/${j.id}/download/export">Download YOLO ZIP ↓</a>`:''}${j.evidence_path?`<a href="/api/jobs/${j.id}/download/evidence">Evidence ↓</a>`:''}${['queued','running'].includes(j.status)?`<button data-action="cancel" data-id="${j.id}">Cancel</button>`:''}${['cancelled','interrupted','failed','completed_with_errors'].includes(j.status)?`<button data-action="resume" data-id="${j.id}">Resume / retry</button>`:''}</div>${j.errors.length?`<details><summary>${j.errors.length} failure(s) · failed photos are omitted from the ZIP</summary>${j.errors.map(e=>`<p>${esc(e.image||e.stage)}: ${esc(e.error)}</p>`).join('')}</details>`:''}</article>`;}).join('');
+}
+$('#jobs').onclick=async event=>{const button=event.target.closest('button[data-action]');if(!button)return;try{await api(`jobs/${button.dataset.id}/${button.dataset.action}`,{method:'POST'});await loadJobs();}catch(e){notice(e.message,true);}};
+for(const [input, destination] of [['image-upload','#source'],['catalog-upload','#catalog-source'],['model-upload','[name=checkpoint]']]) { $('#'+input).onchange=async event=>{try {const file=event.target.files[0];if(!file)return;const result=await upload(file);$(destination).value=result.path;notice(file.name+' is ready.');}catch(e){notice(e.message,true);}}; }
+$('#settings-form').onsubmit=async event=>{event.preventDefault();try{const result={};for(const el of event.target.elements){if(!el.name)continue;result[el.name]=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.value;}fillSettings(await api('settings',{method:'PUT',body:JSON.stringify(result)}));notice('Settings saved. New batches will use this configuration.');}catch(e){notice(e.message,true);}};
+$('#catalog-form').onsubmit=async event=>{event.preventDefault();const button=event.target.querySelector('button[type=submit]');button.disabled=true;try{await api('catalogs',{method:'POST',body:JSON.stringify({source:$('#catalog-source').value,target:$('#catalog-role').value==='target',sheet:$('#sheet').value||null,header_row:Number($('#header-row').value),barcode_column:$('#barcode-column').value,name_column:$('#name-column').value,image_column:$('#image-column').value})});await loadCatalogs();notice('Catalog imported. Inspect the reference gallery for mapping errors.');}catch(e){notice(e.message,true);}finally{button.disabled=false;}};
+$('#batch-form').onsubmit=async event=>{event.preventDefault();$('#start-batch').disabled=true;try{const job=await api('jobs',{method:'POST',body:JSON.stringify({source:$('#source').value,mode:$('#mode').value,catalog_ids:[...document.querySelectorAll('#catalog-selection input:checked')].map(el=>el.value)})});notice('Batch '+job.id.slice(0,8)+' queued.');await loadJobs();}catch(e){notice(e.message,true);}finally{$('#start-batch').disabled=false;}};
+(async()=>{try{const system=await api('system');token=system.token;fillSettings(system.settings);$('#hardware').textContent=system.platform+' · '+system.memory_gb+' GB RAM';await loadCatalogs();await loadJobs();setInterval(()=>loadJobs().catch(e=>notice(e.message,true)),2500);}catch(e){notice(e.message,true);}})();
