@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
+from .references import prepare_reference, PREPARATION_VERSION
 
 
 def normalize(vectors):
@@ -27,11 +28,31 @@ class CatalogIndex:
         if not self.references:
             raise ValueError('Catalogs contain no mapped reference images')
         fingerprint = {'encoder': encoder.version, 'catalogs': [c['catalog_version'] for c in catalogs],
-                       'references': [(self.records[i]['sku_id'], self.records[i]['target'], r['sha256']) for i, r in self.references],
-                       'crop_preparation': 'rgb_exif_v1'}
+                       'references': [(self.records[i]['sku_id'], self.records[i]['target'], r['sha256'], r.get('shelf_example', False)) for i, r in self.references],
+                       'crop_preparation': PREPARATION_VERSION}
         key = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
         self.cache_path = Path(cache_dir) / f'{key}.npy'
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # Save the exact prepared view for inspection, including on cache hits.
+        prepared = []
+        for idx, ref in self.references:
+            style = 'shelf_v1' if ref.get('shelf_example') else PREPARATION_VERSION
+            view_path = self.cache_path.parent / 'references' / f"{ref['sha256']}_{style}.png"
+            audit_path = view_path.with_suffix('.json')
+            if not view_path.exists() or not audit_path.exists():
+                with Image.open(ref['path']) as original:
+                    if ref.get('shelf_example'):
+                        view = ImageOps.exif_transpose(original).convert('RGB')
+                        audit = {'version': 'reviewed_shelf_crop_v1', 'prepared_size': list(view.size),
+                                 'low_resolution': min(view.size) < 64, 'cropped': False}
+                    else:
+                        view, audit = prepare_reference(original)
+                view_path.parent.mkdir(parents=True, exist_ok=True)
+                view.save(view_path)
+                audit_path.write_text(json.dumps(audit), encoding='utf-8')
+            audit = json.loads(audit_path.read_text(encoding='utf-8'))
+            prepared.append((idx, {**ref, 'prepared_path': str(view_path.resolve()), 'preparation': audit}))
+        self.references = prepared
         self.cache_hit = self.cache_path.exists()
         if self.cache_hit:
             self.vectors = normalize(np.load(self.cache_path, allow_pickle=False))
@@ -44,7 +65,7 @@ class CatalogIndex:
             for offset in range(0, len(self.references), batch_size):
                 images = []
                 for _, ref in self.references[offset:offset + batch_size]:
-                    with Image.open(ref['path']) as image:
+                    with Image.open(ref['prepared_path']) as image:
                         images.append(ImageOps.exif_transpose(image).convert('RGB'))
                 batches.append(normalize(encoder.encode(images)))
                 if on_progress:
@@ -65,7 +86,7 @@ class CatalogIndex:
             aggregate = {}
             for (idx, ref), score in zip(self.references, scores):
                 if idx not in aggregate or score > aggregate[idx][0]:
-                    aggregate[idx] = (float(score), ref['source_name'] if 'source_name' in ref else ref['path'])
+                    aggregate[idx] = (float(score), ref)
             ranked = sorted(aggregate.items(), key=lambda pair: pair[1][0], reverse=True)
             shortlist = ranked[:top_k]
             if include_membership:
@@ -76,8 +97,17 @@ class CatalogIndex:
                     if best and best[0] not in selected:
                         shortlist.append(best)
                         selected.add(best[0])
+                best_target = next((pair for pair in ranked if self.records[pair[0]]['target']), None)
+                if best_target:
+                    code = self.records[best_target[0]]['barcode']
+                    rival = next((pair for pair in ranked if self.records[pair[0]]['target'] and self.records[pair[0]]['barcode'] != code), None)
+                    if rival and rival[0] not in selected:
+                        shortlist.append(rival)
             results.append([{'sku_id': self.records[idx]['sku_id'], 'barcode': self.records[idx]['barcode'],
                              'name': self.records[idx]['name'], 'target': self.records[idx]['target'],
-                             'score': score, 'score_type': 'cosine_similarity', 'reference': ref}
+                             'score': score, 'score_type': 'cosine_similarity',
+                             'reference': ref.get('source_name', ref['path']),
+                             'reference_path': ref['path'], 'prepared_reference_path': ref['prepared_path'],
+                             'reference_preparation': ref['preparation']}
                             for idx, (score, ref) in shortlist])
         return results

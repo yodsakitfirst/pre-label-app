@@ -47,18 +47,16 @@ def test_interior_box_is_not_claimed_to_prove_full_visibility():
     assert result['completeness_evidence']['occlusion_checked'] is False
 
 
-def test_review_boxes_are_separate_from_main_export(tmp_path):
+def test_single_export_contains_only_qualifying_product_boxes(tmp_path):
     path = tmp_path / 'shelf.png'
     Image.new('RGB', (100, 100)).save(path)
     detections = [{'bbox_xyxy_pixels': [10, 10, 30, 80], 'decision': 'retain'},
                   {'bbox_xyxy_pixels': [50, 10, 70, 80], 'decision': 'defer_review'}]
     images = [{'path': str(path), 'name': 'shelf.png', 'width': 100, 'height': 100, 'detections': detections}]
     main = export_zip(images, tmp_path / 'main.zip')
-    review = export_zip(images, tmp_path / 'review.zip', stream='review')
     with zipfile.ZipFile(main) as z:
         assert z.read('labels/shelf.txt').decode().splitlines() == ['0 0.20000000 0.45000000 0.20000000 0.70000000']
-    with zipfile.ZipFile(review) as z:
-        assert z.read('labels/shelf.txt').decode().splitlines() == ['0 0.60000000 0.45000000 0.20000000 0.70000000']
+    assert len(list(tmp_path.glob('*.zip'))) == 1
 
 
 def test_batch_defaults_to_reference_filter_with_complete_frame_preference():

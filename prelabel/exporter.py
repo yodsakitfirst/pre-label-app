@@ -15,9 +15,7 @@ def yolo_row(box, width, height):
     return '0 ' + ' '.join(f'{v:.8f}' for v in ((x1+x2)/2/width, (y1+y2)/2/height, (x2-x1)/width, (y2-y1)/height))
 
 
-def export_zip(images: list[dict], destination: Path, stream='main'):
-    if stream not in ('main', 'review'):
-        raise ValueError('Export stream must be main or review')
+def export_zip(images: list[dict], destination: Path):
     destination = Path(destination)
     if not images:
         raise ValueError('Cannot export a batch with no successful images')
@@ -33,8 +31,7 @@ def export_zip(images: list[dict], destination: Path, stream='main'):
                     raise ValueError('Export names must be unique simple filenames')
                 names.add(Path(name).stem.casefold())
                 rows = [yolo_row(d['bbox_xyxy_pixels'], im['width'], im['height'])
-                        for d in im['detections'] if (d['decision'] == 'defer_review' if stream == 'review'
-                                                    else d['decision'] in ('retain', 'retain_uncertain'))]
+                        for d in im['detections'] if d['decision'] in ('retain', 'retain_uncertain')]
                 z.write(im['path'], f'images/{name}')
                 z.writestr(f'labels/{Path(name).stem}.txt', '\n'.join(rows) + ('\n' if rows else ''))
         os.replace(temp, destination)

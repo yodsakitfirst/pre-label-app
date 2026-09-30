@@ -10,7 +10,7 @@ The provided model and nine catalog ZIPs have been copied/ingested under the ign
 .\.venv\Scripts\python.exe -m prelabel serve
 ```
 
-Or run `scripts/start.ps1`. In Batches, enter an image folder/ZIP path or choose an image ZIP. Use the default **Reference-matched export + review ZIP** mode with the local encoder and selected target catalogs. Keep **Exclude likely image-edge cuts** checked. Download the main YOLO ZIP, review ZIP and evidence when processing finishes. Existing batches keep their original settings; start a new batch to apply the filter.
+Or run `scripts/start.ps1`. In Batches, enter an image folder/ZIP path or choose an image ZIP. Use the default **Catalog-guided pre-labeling · one ZIP** mode with the local encoder and selected target catalogs. Keep **Exclude likely image-edge cuts** checked. Download the single YOLO ZIP when processing finishes. It contains original photos and qualifying product boxes. Omitted detections remain visible in the app and evidence report. Existing batches keep their original settings; start a new batch to apply the filter.
 
 This computer already has a configured Python 3.12 environment. Do not run `py -3 -m venv .venv` over it: Windows locks the launcher while the app runs, and an attempted recreation with another Python version can leave mixed incompatible packages. Use the start command above. Stop the server with Ctrl+C before deliberately rebuilding an environment.
 
@@ -75,7 +75,7 @@ This downloads `google/siglip2-base-patch16-224` into `runtime/models/siglip2-ba
 
 Reference embeddings are normalized, cached, and compared by cosine similarity. Multiple reference views are aggregated by source SKU record before shortlisting. Cache identity includes reference hashes, target status, catalog identity, model weights/config and Transformers version. Crops come from full-resolution, correctly oriented image pixels and are encoded in bounded batches. Top-K and batch size are configurable.
 
-Scores are similarities, not probabilities or calibrated SKU confidence. A nearest target match does not establish that a crop belongs to the target list. The default reference-filter mode uses the selected target references to gate the main export. The experimental default cutoff is **0.75**. Crops below it, without target candidates, or too close to a selected excluded-reference match go to `review_candidates.zip`. The strongest target and excluded candidates are considered even outside the displayed top-K. This is a recoverable export preference, not a validated membership classifier: similar non-target packaging can still pass, and real targets can fall below the cutoff. Tune it using reviewed shelf photos. Candidates and raw scores are in the evidence JSON; both YOLO ZIPs export class `0: product`, with no automatic SKU assignment.
+Scores are similarities, not probabilities or calibrated SKU confidence. A nearest target match does not establish that a crop belongs to the target list. The default reference-filter mode uses the selected target references to gate the main export. The experimental default cutoff is **0.75**. Crops below it, without target candidates, or too close to a selected excluded-reference match are omitted from the annotation ZIP and kept in the evidence report. The strongest target and excluded candidates are considered even outside the displayed top-K. This is a recoverable export preference, not a validated membership classifier: similar non-target packaging can still pass, and real targets can fall below the cutoff. Tune it using reviewed shelf photos. Candidates and raw scores are in the evidence JSON; the single YOLO ZIP exports class `0: product`, with no automatic SKU assignment.
 
 **Detector baseline** ignores catalogs. **Catalog candidates only** computes reference matches but keeps uncertain detector boxes. Both still apply the image-edge filter when enabled. The default image-edge check defers boxes within 1% of the image boundary. It can exclude complete products near the edge and miss cropped products whose detected box stops inside that margin. It does not verify products hidden behind shelves or other products. Edge margin, cutoff and excluded-match margin are configurable under Model & settings; the checkbox and cutoff can also be overridden per batch.
 
@@ -159,3 +159,41 @@ For an accuracy pilot, review approximately 100 representative shelf photos incl
 The provided checkpoint records Ultralytics 8.4.80, YOLO26n, SKU-110K training and `0: object`. Ultralytics and the checkpoint metadata identify AGPL-3.0; review your intended distribution/deployment under the [Ultralytics licensing terms](https://www.ultralytics.com/license). The code does not grant rights to the supplied weights, workbook/catalog images or datasets. SigLIP 2's [model card](https://huggingface.co/google/siglip2-base-patch16-224) lists Apache-2.0. Check upstream model/data permissions before distribution.
 
 Official references: [Ultralytics prediction](https://docs.ultralytics.com/modes/predict/), [SigLIP 2](https://huggingface.co/google/siglip2-base-patch16-224), [PyTorch MPS](https://docs.pytorch.org/docs/stable/notes/mps.html), [PaddleX recognition models](https://paddlepaddle.github.io/PaddleX/latest/en/module_usage/tutorials/ocr_modules/text_recognition.html).
+# Improving catalog matching
+
+New catalog indexes use prepared reference views: white margins and disconnected
+headings are cropped where a product silhouette can be established. Light or
+ambiguous images keep their original canvas. Original catalog images are retained.
+The cache is versioned, so existing indexes are rebuilt automatically. Small
+references are flagged in the match review; enlargement cannot recover missing detail.
+
+Reference-matched mode requires the best target to pass the similarity cutoff
+and beat excluded examples. Close matches between two target SKUs do not block
+the generic product box: either could establish target-list membership. The SKU
+margin (default 0.03) reports an exact-identity ambiguity hint only; it does not
+filter exports. Duplicate views of one barcode do not count as different products.
+Scores remain raw, uncalibrated similarities. Omitted boxes stay in the evidence
+report and optional match review. Only one annotation ZIP is generated per batch.
+
+After processing, click **Review matches** on a batch:
+
+1. Compare the shelf crop against the candidate reference images. Open **Original
+   reference** to check preparation and image-to-barcode associations.
+2. Choose the actual target SKU and save **Correct SKU**, or save **Outside selected
+   catalogs** / **Incomplete or invalid box**. Clear a review to undo it.
+3. Start a new batch with the same catalogs. Correct crops become additional target
+   views; outside-catalog crops become excluded examples for that exact catalog
+   selection. Incomplete boxes are recorded for evaluation, not used as references.
+4. Use **Check reviewed accuracy** to replay cutoff choices on reviewed boxes.
+   These results are diagnostic, not independent calibration. Review a representative
+   set including accepted boxes, rejected targets, similar variants, and non-list
+   products; test on separate photos before changing defaults.
+
+Saved reviews do not change existing exports. Model weights are not trained by this
+feature. New-job configurations snapshot reviewed examples; clearing a review does
+not invalidate already queued jobs. Settings can disable reviewed examples. The CLI
+supports `--reference-sku-margin` and `--no-reviewed-examples`.
+
+OCR remains an auxiliary text view: weak or unreadable text does not establish a SKU
+and does not override the visual gate. Interior occlusion and complete promotional
+pack boundaries still require human review.

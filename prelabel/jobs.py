@@ -152,6 +152,9 @@ class JobRunner:
                     self.store.update(job_id, stage=f'indexing_references_{done}_of_{total}')
                 index = CatalogIndex(catalogs, encoder, self.store.root / 'indexes', config.get('crop_batch_size', 16), on_progress=index_progress)
                 metadata['encoder'] = encoder.version
+                from .references import PREPARATION_VERSION
+                metadata['reference_preparation'] = {'version': PREPARATION_VERSION,
+                                                     'index': index.cache_path.stem}
             if config.get('ocr_enabled'):
                 from .ocr import create_ocr
                 self.store.update(job_id, stage='loading_ocr')
@@ -243,7 +246,6 @@ class JobRunner:
             if status == 'running':
                 status = 'completed_with_errors' if errors else 'completed'
             export_path = None
-            review_path = None
             preview_path = None
             preview_warning = None
             counts = {'retained': 0, 'deferred': 0, 'edge_risk': 0, 'removed': 0}
@@ -255,8 +257,6 @@ class JobRunner:
             if status in ('completed', 'completed_with_errors') and results:
                 self.store.update(job_id, stage='exporting')
                 export_path = str(export_zip([results[k] for k in sorted(results, key=int)], directory / 'set_001.zip'))
-                if counts['deferred']:
-                    review_path = str(export_zip([results[k] for k in sorted(results, key=int)], directory / 'review_candidates.zip', stream='review'))
                 from .preview import save_preview
                 try:
                     preview_path = save_preview(results[min(results, key=int)], directory / 'preview.jpg')
@@ -264,7 +264,7 @@ class JobRunner:
                     preview_warning = f'{type(exc).__name__}: {exc}'
             if status == 'completed_with_errors' and not results:
                 status = 'failed'
-            self.store.update(job_id, status=status, export_path=export_path, review_export_path=review_path, box_counts=counts,
+            self.store.update(job_id, status=status, export_path=export_path, review_export_path=None, box_counts=counts,
                               preview_path=preview_path, preview_warning=preview_warning)
         except JobCancelled:
             self.store.update(job_id, status='interrupted' if self.stop_event.is_set() else 'cancelled')
@@ -295,7 +295,10 @@ class JobRunner:
                         'preview_warning': self.store.get(job_id).get('preview_warning'),
                         'policy': {'mode': config.get('mode', 'baseline'), 'full_product_only': config.get('full_product_only', False),
                                    'reference_min_similarity': config.get('reference_min_similarity'),
-                                   'threshold_calibrated': False, 'deferred_boxes_recoverable': True,
+                                   'reference_sku_margin': config.get('reference_sku_margin', 0.03),
+                                   'sku_margin_filters_export': False,
+                                   'threshold_calibrated': False, 'deferred_boxes_in_evidence': True,
+                                   'export_zip_count': int(bool(self.store.get(job_id).get('export_path'))),
                                    'occlusion_checked': False, 'automatic_pack_detection': False}}
             write_json(directory / 'evidence.json', evidence)
             self.store.update(job_id, evidence_path=str(directory / 'evidence.json'), elapsed_seconds=evidence['elapsed_seconds'],

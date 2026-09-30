@@ -49,3 +49,69 @@ A full CPU run on `5b0db553` with selected HAIR references, visual cutoff 0.65 a
 OCR evidence, per-crop coordinates/status/error, text-supported candidate rankings, API report download and browser read-only results view are implemented. Unreadable/skipped/failed OCR does not remove detections or change similarity/export decisions. Candidate suggestions are not verified SKU labels. Browser validation shows the enabled batch checkbox, counts and readable report table. This photo's small angled text remains a material limitation; evaluate closer/full-resolution capture and alternative recognizers before adding OCR-based acceptance rules or Laya.
 
 Independent review caught the BGR conversion and legacy-backend migration issues; both are repaired with regression coverage. See tests/test_ocr.py for adapter, text normalization, score filtering, barcode boundaries, failure isolation, limit handling, report API and policy independence checks.
+## Matching improvements — 2026-09-30
+
+Implemented on `fix/improve` in the existing checkout. No worktree was created.
+The automated suite passes 57 tests; JavaScript syntax and `git diff --check`
+pass. The suite still reports the existing Starlette/httpx deprecation warning.
+
+Regression coverage includes disconnected headings touching the canvas edge,
+light-colored bottle bodies, fallback where only a colored cap is visible,
+distinct-barcode ambiguity at Top-K=1, duplicate-barcode views, review crop
+coordinates, feedback persistence, scoped excluded examples, immutable crops
+after undo, new-job example snapshots, and previously missing target views.
+
+Real local inference: job `77f13d72cfe145e0b3073c56b5b12438` under
+`runtime/matching_validation`, using the wide shelf photo and selected HAIR
+catalog. OCR disabled to isolate matching changes. Preparation version
+`white_canvas_components_v3`, cutoff 0.60, SKU margin 0.03, edge checks enabled:
+224 detections, 24 main-export boxes, 200 deferred, zero image failures,
+218.15 seconds. Deferred reasons: 99 competing-SKU ambiguities, 97 below cutoff,
+4 image-edge risks. The earlier raw-reference job at the same cutoff exported
+135 and deferred 89. This comparison measures changed eligibility, not accuracy.
+
+Replaying the final scores at 0.65 / 0.70 / 0.75 exports 11 / 1 / 0 boxes.
+Defaults were not lowered based on an unlabelled sample. Some incorrect
+cross-brand matches still pass at 0.60; reviewed negative examples and validation
+on separate photos are needed before claiming useful catalog precision or recall.
+
+The repeated Sunsilk reference `8851932415804` now prepares from 91×138 to
+37×115, removing the detached barcode heading and flagging its limited resolution.
+Original files are preserved. The gallery does not establish image-to-barcode
+correctness automatically.
+
+Browser verification used a separate `runtime/matching_ui_test` store: all
+candidate images displayed, review saved, threshold replay showed one reviewed
+box, and review cleared. No test review was added to the primary runtime.
+Screenshot: `runtime/matching-review-ui.png`. The temporary server was stopped
+after verification.
+## Correction: target membership versus exact SKU identity
+
+The competing-target-SKU export gate described in the earlier matching run was
+too strict for generic product pre-labelling. It has been removed. Similarity
+between two target SKUs now produces an identity-ambiguity hint only. The minimum
+target similarity, excluded-reference margin, and image-edge checks remain active.
+No exact SKU is assigned by this gate.
+
+Replaying saved scores from primary batch `3084c91ca2f14d55807f98b29c417e59` at its
+0.60 cutoff with the corrected policy retains 123 boxes, defers 97 below cutoff,
+and defers 4 edge-risk boxes. This is a policy replay, not a new inference run or
+an accuracy measurement. Historical exports retain their original decisions.
+
+The full suite passes 58 tests, including close target-target matches retaining
+a generic box while close target-excluded matches remain deferred.
+## Single annotation ZIP
+
+New batches produce only `set_001.zip`: original photos and qualifying generic
+product boxes. Omitted detections remain in the evidence JSON and match inspection
+view. The worker no longer writes `review_candidates.zip`; the review download
+route and link were removed, including for legacy job summaries. Previously saved
+files are preserved on disk. The target-membership policy is unchanged by this
+export simplification.
+
+Verification: 59 tests passed, JavaScript syntax and diff whitespace checks passed.
+Tests cover one physical ZIP despite omitted edge boxes, retained omitted-box
+evidence, and hiding/disabling legacy second-ZIP downloads. Browser verification
+showed one annotation download for a copied historical batch in an isolated test
+store; its displayed counts are historical, not a fresh inference result.
+Screenshot: `runtime/single-export-ui.png`. The temporary server was stopped.

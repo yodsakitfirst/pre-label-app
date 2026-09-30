@@ -142,7 +142,7 @@ def test_resume_rejects_changed_completed_image(tmp_path):
     assert 'changed' in result['errors'][0]['error'].lower()
 
 
-def test_worker_exports_edge_risk_in_separate_review_zip(tmp_path):
+def test_worker_produces_one_zip_and_keeps_omitted_boxes_in_evidence(tmp_path):
     store = JobStore(tmp_path)
     job = store.create(stage(tmp_path, 1), {'mode': 'baseline', 'full_product_only': True, 'edge_margin_fraction': 0.01})
     class EdgeDetector(Detector):
@@ -154,8 +154,11 @@ def test_worker_exports_edge_risk_in_separate_review_zip(tmp_path):
     assert result['box_counts'] == {'retained': 0, 'deferred': 1, 'edge_risk': 1, 'removed': 0}
     with zipfile.ZipFile(result['export_path']) as z:
         assert z.read('labels/0.txt') == b''
-    with zipfile.ZipFile(result['review_export_path']) as z:
-        assert len(z.read('labels/0.txt').splitlines()) == 1
+    assert result.get('review_export_path') is None
+    assert [p.name for p in Path(result['directory']).glob('*.zip')] == ['set_001.zip']
+    import json
+    evidence = json.loads(Path(result['evidence_path']).read_text(encoding='utf-8'))
+    assert evidence['results'][0]['detections'][0]['decision'] == 'defer_review'
     assert Path(result['preview_path']).is_file()
 
 
@@ -169,6 +172,16 @@ def test_resume_clears_all_export_artifacts(tmp_path):
     assert resumed['review_export_path'] is None
     assert resumed['preview_path'] is None
     assert resumed['box_counts'] is None
+
+
+def test_api_exposes_one_zip_even_for_legacy_two_zip_jobs(tmp_path):
+    app = create_app(tmp_path, start_worker=False)
+    job = app.state.store.create(stage(tmp_path, 1), {'mode': 'baseline'})
+    app.state.store.update(job['id'], status='completed', review_export_path='old_review.zip')
+    with TestClient(app) as client:
+        summary = client.get(f"/api/jobs/{job['id']}").json()
+        assert 'review_export_path' not in summary
+        assert client.get(f"/api/jobs/{job['id']}/download/review").status_code == 404
 
 
 def test_optional_preview_failure_preserves_completed_exports(tmp_path, monkeypatch):

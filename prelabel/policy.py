@@ -29,10 +29,15 @@ def decide(evidence: dict, baseline=False, config=None, image_size=None):
         excluded = [c for c in candidates if c.get('target') is False]
         target = max(targets, key=lambda c: c['score'], default=None)
         exclusion = max(excluded, key=lambda c: c['score'], default=None)
+        rival = max((c for c in targets if target and c.get('barcode', c.get('sku_id')) != target.get('barcode', target.get('sku_id'))),
+                    key=lambda c: c['score'], default=None)
         threshold = config.get('reference_min_similarity', 0.75)
         result['reference_gate'] = {'minimum_similarity': threshold, 'calibrated': False,
                                     'best_target': target, 'best_excluded': exclusion,
-                                    'excluded_margin': config.get('excluded_margin', 0.03)}
+                                    'excluded_margin': config.get('excluded_margin', 0.03),
+                                    'best_competing_sku': rival, 'sku_margin': config.get('reference_sku_margin', 0.03),
+                                    'sku_margin_filters_export': False,
+                                    'sku_identity_ambiguous': bool(target and rival and target['score'] - rival['score'] < config.get('reference_sku_margin', 0.03))}
         result.update(decision='defer_review', decision_reason='no_target_reference_candidate')
         if target and target['score'] < threshold:
             result['decision_reason'] = 'below_reference_export_threshold'

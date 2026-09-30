@@ -36,6 +36,9 @@ def main():
     batch.add_argument('--confidence', type=float, default=0.1)
     batch.add_argument('--mode', choices=['baseline', 'retrieval', 'reference_filter'])
     batch.add_argument('--reference-min-similarity', type=float, default=0.75)
+    batch.add_argument('--reference-sku-margin', type=float, default=0.03,
+                       help='Exact-SKU ambiguity hint only; does not filter product boxes')
+    batch.add_argument('--no-reviewed-examples', action='store_true')
     batch.add_argument('--allow-edge-products', action='store_true')
     batch.add_argument('--ocr', action='store_true', help='Enable local Thai/English OCR')
     batch.add_argument('--ocr-model-dir', help='EasyOCR model folder; defaults to HOME/models/easyocr-th-en')
@@ -106,6 +109,7 @@ def main():
         config = Settings(checkpoint=str(checkpoint), encoder_path=args.encoder or '', device=args.device,
                           confidence=args.confidence, image_size=args.image_size,
                           reference_min_similarity=args.reference_min_similarity, full_product_only=not args.allow_edge_products,
+                          reference_sku_margin=args.reference_sku_margin, use_reviewed_examples=not args.no_reviewed_examples,
                           ocr_enabled=args.ocr, ocr_model_dir=args.ocr_model_dir or str(root / 'models' / 'easyocr-th-en'),
                           ocr_max_crops=args.ocr_max_crops).model_dump()
         if args.ocr:
@@ -120,6 +124,11 @@ def main():
             if not set(args.catalog_id) <= available:
                 parser.error('Unknown catalog ID')
             config['catalogs'] = [c for c in config['catalogs'] if c['catalog_id'] in args.catalog_id]
+        if config['mode'] != 'baseline' and config['use_reviewed_examples']:
+            from .review import reviewed_catalog
+            examples = reviewed_catalog(root, [c['catalog_id'] for c in config['catalogs']])
+            if examples:
+                config['catalogs'].append(examples)
         if config['mode'] == 'reference_filter' and not any(r['target'] and r['references'] for c in config['catalogs'] for r in c['records']):
             parser.error('Reference filtering requires target catalog references')
         store = JobStore(root)
@@ -127,6 +136,6 @@ def main():
         JobRunner(store).run_job(job['id'])
         result = store.get(job['id'])
         print(json.dumps({k: result.get(k) for k in ('id', 'status', 'completed', 'errors', 'box_counts', 'ocr_counts',
-                                                    'ocr_report_path', 'export_path', 'review_export_path', 'preview_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
+                                                    'ocr_report_path', 'export_path', 'preview_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
         if result['status'] != 'completed':
             sys.exit(1)
