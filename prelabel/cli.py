@@ -18,6 +18,7 @@ def main():
     commands.add_parser('doctor', help='Report hardware and installed model dependencies')
     download = commands.add_parser('download-model', help='Explicitly download SigLIP 2 weights for subsequent offline processing')
     download.add_argument('--revision', default='main')
+    commands.add_parser('download-ocr', help='Download local Thai/English EasyOCR models and enable OCR for new batches')
     catalog = commands.add_parser('catalog', help='Ingest a catalog ZIP or explicitly mapped workbook')
     catalog.add_argument('source')
     catalog.add_argument('--excluded', action='store_true')
@@ -36,6 +37,9 @@ def main():
     batch.add_argument('--mode', choices=['baseline', 'retrieval', 'reference_filter'])
     batch.add_argument('--reference-min-similarity', type=float, default=0.75)
     batch.add_argument('--allow-edge-products', action='store_true')
+    batch.add_argument('--ocr', action='store_true', help='Enable local Thai/English OCR')
+    batch.add_argument('--ocr-model-dir', help='EasyOCR model folder; defaults to HOME/models/easyocr-th-en')
+    batch.add_argument('--ocr-max-crops', type=int, default=300)
     batch.add_argument('--catalog-id', action='append', default=[], help='Catalog ID (repeatable); default all ingested catalogs')
     args = parser.parse_args()
     root = Path(args.home).resolve()
@@ -49,7 +53,7 @@ def main():
         import psutil
         report = {'platform': platform.platform(), 'python': sys.version,
                   'memory_gb': round(psutil.virtual_memory().total / 1024**3, 2),
-                  'dependencies': {m: importlib.util.find_spec(m) is not None for m in ('torch', 'ultralytics', 'transformers', 'rapidocr')}}
+                  'dependencies': {m: importlib.util.find_spec(m) is not None for m in ('torch', 'ultralytics', 'transformers', 'easyocr', 'rapidocr')}}
         if report['dependencies']['torch']:
             import torch
             report.update(torch=torch.__version__, cuda=torch.cuda.is_available(), mps=torch.backends.mps.is_available())
@@ -66,6 +70,23 @@ def main():
             settings = json.loads(settings_path.read_text(encoding='utf-8'))
             settings['encoder_path'] = str(destination)
             write_json(settings_path, settings)
+    elif args.command == 'download-ocr':
+        from easyocr import Reader
+        from .ocr import EasyOCREngine, EASY_MODEL_FILES
+        destination = root / 'models' / 'easyocr-th-en'
+        destination.mkdir(parents=True, exist_ok=True)
+        Reader(['th', 'en'], gpu=False, model_storage_directory=str(destination),
+               user_network_directory=str(destination / 'networks'), download_enabled=True, verbose=False)
+        # Validate an offline load before changing settings.
+        engine = EasyOCREngine(destination)
+        write_json(destination / 'manifest.json', engine.version)
+        from .app import Settings
+        path = root / 'settings.json'
+        config = Settings(**json.loads(path.read_text(encoding='utf-8'))).model_dump() if path.exists() else Settings().model_dump()
+        config.update(ocr_enabled=True, ocr_backend='easyocr', ocr_model_dir=str(destination))
+        write_json(path, config)
+        print(json.dumps({'ocr_enabled': True, 'languages': ['th', 'en'], 'model_dir': str(destination),
+                          'files': list(EASY_MODEL_FILES)}, indent=2))
     elif args.command == 'catalog':
         from .catalog import ingest_catalog
         result = ingest_catalog(Path(args.source), root / 'catalogs', target=not args.excluded,
@@ -84,7 +105,12 @@ def main():
             parser.error('Invalid detector score or image size')
         config = Settings(checkpoint=str(checkpoint), encoder_path=args.encoder or '', device=args.device,
                           confidence=args.confidence, image_size=args.image_size,
-                          reference_min_similarity=args.reference_min_similarity, full_product_only=not args.allow_edge_products).model_dump()
+                          reference_min_similarity=args.reference_min_similarity, full_product_only=not args.allow_edge_products,
+                          ocr_enabled=args.ocr, ocr_model_dir=args.ocr_model_dir or str(root / 'models' / 'easyocr-th-en'),
+                          ocr_max_crops=args.ocr_max_crops).model_dump()
+        if args.ocr:
+            from .ocr import validate_ocr
+            validate_ocr(config)
         config.update(checkpoint_sha256=digest(checkpoint), mode=args.mode or ('reference_filter' if args.encoder else 'baseline'))
         if config['mode'] in ('retrieval', 'reference_filter') and not args.encoder:
             parser.error('Catalog-based modes require --encoder with a local model folder')
@@ -100,6 +126,7 @@ def main():
         job = store.create(import_images(Path(args.source), root / 'inputs' / uuid.uuid4().hex), config)
         JobRunner(store).run_job(job['id'])
         result = store.get(job['id'])
-        print(json.dumps({k: result.get(k) for k in ('id', 'status', 'completed', 'errors', 'box_counts', 'export_path', 'review_export_path', 'preview_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
+        print(json.dumps({k: result.get(k) for k in ('id', 'status', 'completed', 'errors', 'box_counts', 'ocr_counts',
+                                                    'ocr_report_path', 'export_path', 'review_export_path', 'preview_path', 'evidence_path', 'elapsed_seconds')}, indent=2))
         if result['status'] != 'completed':
             sys.exit(1)

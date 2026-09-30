@@ -12,9 +12,10 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from PIL import UnidentifiedImageError
 import yaml
+from typing import Literal
 
 from .catalog import ingest_catalog
 from .files import digest, write_json
@@ -39,11 +40,22 @@ class Settings(BaseModel):
     reference_min_similarity: float = Field(default=0.75, ge=-1, le=1)
     excluded_margin: float = Field(default=0.03, ge=0, le=2)
     ocr_enabled: bool = False
+    ocr_backend: Literal['easyocr', 'rapidocr'] = 'easyocr'
+    ocr_model_dir: str = ''
+    ocr_min_score: float = Field(default=0.7, ge=0, le=1)
     ocr_detection_model: str = ''
     ocr_recognition_model: str = ''
     ocr_dictionary: str = ''
     ocr_margin: float = Field(default=0.05, ge=0, le=2)
-    ocr_max_crops: int = Field(default=20, ge=1, le=100)
+    ocr_max_crops: int = Field(default=300, ge=1, le=10000)
+
+    @model_validator(mode='before')
+    @classmethod
+    def keep_legacy_ocr_backend(cls, value):
+        if isinstance(value, dict) and 'ocr_backend' not in value:
+            from .ocr import backend_name
+            value = {**value, 'ocr_backend': backend_name(value)}
+        return value
 
 
 class JobRequest(BaseModel):
@@ -52,6 +64,7 @@ class JobRequest(BaseModel):
     catalog_ids: list[str] = []
     full_product_only: bool | None = None
     reference_min_similarity: float | None = Field(default=None, ge=-1, le=1)
+    ocr_enabled: bool | None = None
 
 
 class CatalogRequest(BaseModel):
@@ -147,8 +160,9 @@ def create_app(root=None, start_worker=True):
             raise ValueError('Device must be auto, cpu, mps, or cuda:0')
         if not Path(value.checkpoint).is_file() or Path(value.checkpoint).suffix.lower() != '.pt':
             raise ValueError('Select an existing .pt detector checkpoint')
-        if value.ocr_enabled and not all(Path(p).is_file() for p in (value.ocr_detection_model, value.ocr_recognition_model, value.ocr_dictionary)):
-            raise ValueError('Select local OCR detection/recognition models and dictionary')
+        if value.ocr_enabled:
+            from .ocr import validate_ocr
+            validate_ocr(value.model_dump())
         write_json(root / 'settings.json', value.model_dump())
         return value
 
@@ -218,9 +232,12 @@ def create_app(root=None, start_worker=True):
             raise ValueError('Configure a detector checkpoint before starting')
         config['checkpoint_sha256'] = digest(checkpoint)
         config['mode'] = value.mode
-        for key in ('full_product_only', 'reference_min_similarity'):
+        for key in ('full_product_only', 'reference_min_similarity', 'ocr_enabled'):
             if getattr(value, key) is not None:
                 config[key] = getattr(value, key)
+        if config.get('ocr_enabled'):
+            from .ocr import validate_ocr
+            validate_ocr(config)
         available = {c['catalog_id']: c for c in catalogs()}
         if any(i not in available for i in value.catalog_ids):
             raise ValueError('Unknown catalog selection')
@@ -239,6 +256,13 @@ def create_app(root=None, start_worker=True):
     def get_job(job_id: str):
         return job_summary(store.get(job_id))
 
+    @app.get('/api/jobs/{job_id}/ocr')
+    def get_ocr_report(job_id: str):
+        path = store.get(job_id).get('ocr_report_path')
+        if not path or not Path(path).is_file():
+            raise HTTPException(404, 'OCR report is not ready')
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+
     @app.post('/api/jobs/{job_id}/cancel')
     def cancel_job(job_id: str):
         return job_summary(store.cancel(job_id))
@@ -249,11 +273,13 @@ def create_app(root=None, start_worker=True):
 
     @app.get('/api/jobs/{job_id}/download/{artifact}')
     def download(job_id: str, artifact: str):
-        key = {'export': 'export_path', 'evidence': 'evidence_path', 'review': 'review_export_path', 'preview': 'preview_path'}.get(artifact)
+        key = {'export': 'export_path', 'evidence': 'evidence_path', 'review': 'review_export_path', 'preview': 'preview_path',
+               'ocr': 'ocr_report_path'}.get(artifact)
         job = store.get(job_id)
         if key is None or not job.get(key) or not Path(job[key]).is_file():
             raise HTTPException(404, 'Artifact is not ready')
-        filename = {'export': 'set_001.zip', 'review': 'review_candidates.zip', 'evidence': 'evidence.json', 'preview': 'preview.jpg'}[artifact]
+        filename = {'export': 'set_001.zip', 'review': 'review_candidates.zip', 'evidence': 'evidence.json',
+                    'preview': 'preview.jpg', 'ocr': 'ocr.json'}[artifact]
         return FileResponse(job[key], filename=f'{job_id[:8]}_{filename}',
                             content_disposition_type='inline' if artifact == 'preview' else 'attachment')
 

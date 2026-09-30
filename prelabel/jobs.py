@@ -87,7 +87,8 @@ class JobStore:
             if sum(j['status'] in ('queued', 'running', 'cancelling') for j in self.list()) >= 8:
                 raise ValueError('The bounded job queue is full')
             return self.update(job_id, status='queued', errors=[], processed=job['completed'], export_path=None,
-                               review_export_path=None, preview_path=None, preview_warning=None, box_counts=None)
+                               review_export_path=None, preview_path=None, preview_warning=None, box_counts=None,
+                               ocr_report_path=None, ocr_counts=None)
 
 
 def default_detector(config):
@@ -152,8 +153,9 @@ class JobRunner:
                 index = CatalogIndex(catalogs, encoder, self.store.root / 'indexes', config.get('crop_batch_size', 16), on_progress=index_progress)
                 metadata['encoder'] = encoder.version
             if config.get('ocr_enabled'):
-                from .models import LocalOCR
-                ocr = LocalOCR(config['ocr_detection_model'], config['ocr_recognition_model'], config['ocr_dictionary'])
+                from .ocr import create_ocr
+                self.store.update(job_id, stage='loading_ocr')
+                ocr = create_ocr(config)
                 metadata['ocr'] = ocr.version
             for saved in results.values():
                 previous_models = saved.get('model_versions') or (saved['detections'][0].get('model_versions') if saved.get('detections') else None)
@@ -200,15 +202,24 @@ class JobRunner:
                     retrieval_time = time.perf_counter() - retrieval_start
                     ocr_start = time.perf_counter()
                     if ocr:
-                        self.store.update(job_id, stage='verifying_ocr')
-                        # At most configured ambiguous crops per image, never a hard eligibility gate.
-                        count = 0
-                        for d in detections:
-                            candidates = d['candidates']
-                            ambiguous = len(candidates) < 2 or candidates[0]['score'] - candidates[1]['score'] < config.get('ocr_margin', 0.05)
-                            if ambiguous and count < config.get('ocr_max_crops', 20):
+                        from .ocr import rank_candidates
+                        for number_ocr, d in enumerate(detections):
+                            if self.stop_event.is_set() or self.store.get(job_id)['status'] == 'cancelling':
+                                raise JobCancelled()
+                            if number_ocr >= config.get('ocr_max_crops', 300):
+                                d['ocr_status'] = 'skipped_limit'
+                                continue
+                            self.store.update(job_id, stage=f'ocr_crop_{number_ocr + 1}_of_{len(detections)}')
+                            try:
                                 d['ocr_evidence'] = ocr.read(image.crop(tuple(d['bbox_xyxy_pixels'])))
-                                count += 1
+                                d['ocr_status'] = 'completed' if d['ocr_evidence'] else 'no_text'
+                                d['ocr_candidate_ranking'] = rank_candidates(d['candidates'], d['ocr_evidence'],
+                                                                           config.get('ocr_min_score', 0.7))
+                            except Exception as exc:
+                                d.update(ocr_status='failed', ocr_error=f'{type(exc).__name__}: {exc}')
+                    else:
+                        for d in detections:
+                            d['ocr_status'] = 'disabled'
                     for d in detections:
                         d.update(decide(d, baseline=config.get('mode') == 'baseline', config=config,
                                         image_size=(image.width, image.height)))
@@ -263,6 +274,20 @@ class JobRunner:
                               review_export_path=None, preview_path=None)
         finally:
             import psutil
+            ocr_report_path = None
+            ocr_counts = None
+            if config.get('ocr_enabled'):
+                from .ocr import make_report
+                ocr_counts = {'attempted': 0, 'with_text': 0, 'failed': 0, 'skipped': 0}
+                for image_result in results.values():
+                    for d in image_result['detections']:
+                        state = d.get('ocr_status')
+                        ocr_counts['attempted'] += state in ('completed', 'no_text', 'failed')
+                        ocr_counts['with_text'] += bool(d.get('ocr_evidence'))
+                        ocr_counts['failed'] += state == 'failed'
+                        ocr_counts['skipped'] += state == 'skipped_limit'
+                ocr_report_path = str(directory / 'ocr.json')
+                write_json(Path(ocr_report_path), make_report([results[k] for k in sorted(results, key=int)]))
             evidence = {'job_id': job_id, 'model_versions': metadata, 'config': config,
                         'results': list(results.values()), 'errors': errors,
                         'elapsed_seconds': time.perf_counter() - start + job['elapsed_seconds'],
@@ -273,4 +298,5 @@ class JobRunner:
                                    'threshold_calibrated': False, 'deferred_boxes_recoverable': True,
                                    'occlusion_checked': False, 'automatic_pack_detection': False}}
             write_json(directory / 'evidence.json', evidence)
-            self.store.update(job_id, evidence_path=str(directory / 'evidence.json'), elapsed_seconds=evidence['elapsed_seconds'], stage='finished')
+            self.store.update(job_id, evidence_path=str(directory / 'evidence.json'), elapsed_seconds=evidence['elapsed_seconds'],
+                              ocr_report_path=ocr_report_path, ocr_counts=ocr_counts, stage='finished')
