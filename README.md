@@ -12,14 +12,16 @@ The provided model and nine catalog ZIPs have been copied/ingested under the ign
 
 Or run `scripts/start.ps1`. In Batches, enter an image folder/ZIP path or choose an image ZIP. Select **Detector baseline**, or **Detector + catalog candidates** with a local encoder and selected catalogs. Download the YOLO ZIP and the separate evidence file when processing finishes.
 
+This computer already has a configured Python 3.12 environment. Do not run `py -3 -m venv .venv` over it: Windows locks the launcher while the app runs, and an attempted recreation with another Python version can leave mixed incompatible packages. Use the start command above. Stop the server with Ctrl+C before deliberately rebuilding an environment.
+
 The browser's uploaded files are copied locally. No shelf photos are sent to an inference service. Model and package downloads need internet during setup; batch processing uses local models.
 
 ## Install on another Windows computer
 
-Install Python 3.11 or newer, then run from the project folder:
+Install Python 3.12 (the tested version), then run from a new project folder without an existing environment:
 
 ```powershell
-py -3 -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[models,test]"
 .\.venv\Scripts\python.exe -m prelabel doctor
 .\.venv\Scripts\python.exe -m prelabel serve
